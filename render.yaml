@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: employee-timekeeping-line
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MANAGER_USER
+        value: manager
+      - key: MANAGER_PASSWORD
+        sync: false
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
