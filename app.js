@@ -469,6 +469,38 @@ async function saveAllEmployees() {
   document.querySelector("#employeeSaveStatus").textContent = "บันทึกแล้ว";
 }
 
+async function downloadBackup() {
+  const backup = await api("/api/backup");
+  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const stamp = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
+  link.href = url;
+  link.download = `employee-timekeeping-backup-${stamp}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+  document.querySelector("#backupStatus").textContent = "ดาวน์โหลดไฟล์สำรองแล้ว";
+}
+
+async function restoreBackup(file) {
+  if (!file) return;
+  const text = await file.text();
+  let backup;
+  try {
+    backup = JSON.parse(text);
+  } catch (error) {
+    alert("ไฟล์สำรองไม่ถูกต้อง");
+    return;
+  }
+  if (!confirm("กู้คืนข้อมูลจากไฟล์นี้ใช่ไหม ข้อมูลปัจจุบันบนระบบจะถูกแทนที่")) return;
+  state = await api("/api/restore", {
+    method: "POST",
+    body: JSON.stringify(backup)
+  });
+  render();
+  document.querySelector("#backupStatus").textContent = "กู้คืนข้อมูลสำเร็จ";
+}
+
 function addDays(date, days) {
   const { year, month, day } = parseIsoDate(date);
   const next = new Date(Date.UTC(year, month - 1, day + days));
@@ -572,6 +604,12 @@ function bindEvents() {
   document.querySelector("#autoScheduleWeek").addEventListener("click", () => autoSchedule(7));
   document.querySelector("#resetDemo").addEventListener("click", resetDemoData);
   document.querySelector("#saveAllEmployees").addEventListener("click", saveAllEmployees);
+  document.querySelector("#downloadBackup").addEventListener("click", downloadBackup);
+  document.querySelector("#restoreBackupFile").addEventListener("change", (event) => {
+    restoreBackup(event.target.files[0]).finally(() => {
+      event.target.value = "";
+    });
+  });
 
   document.querySelector("#employeeForm").addEventListener("submit", async (event) => {
     event.preventDefault();
