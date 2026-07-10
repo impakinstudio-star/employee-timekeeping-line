@@ -14,6 +14,22 @@ const dateText = (date) => {
   const { year, month, day } = parseIsoDate(date);
   return new Intl.DateTimeFormat("th-TH", { day: "2-digit", month: "short", timeZone: "UTC" }).format(new Date(Date.UTC(year, month - 1, day)));
 };
+const datetimeLocalValue = (date) => {
+  if (!date) return "";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Bangkok",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    hour12: false
+  }).formatToParts(new Date(date));
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}`;
+};
+const datetimeLocalToIso = (value) => value ? new Date(`${value}:00+07:00`).toISOString() : null;
 
 let state = {
   employees: [],
@@ -26,6 +42,7 @@ let state = {
 };
 let selectedDate = todayIso();
 let session = { authenticated: false, user: null };
+let editingAttendanceId = null;
 const weekdays = [
   { value: 1, short: "จ", name: "จันทร์" },
   { value: 2, short: "อ", name: "อังคาร" },
@@ -290,6 +307,24 @@ function renderAttendance() {
   document.querySelector("#attendanceRows").innerHTML = rows.map((item) => {
     const employee = findEmployee(item.employeeId);
     const shift = findShift(item.shiftId);
+    if (editingAttendanceId === item.id) {
+      return `
+        <tr class="editing-row">
+          <td>${item.date}</td>
+          <td>${employee?.name || "-"}</td>
+          <td>${shift?.name || "-"}</td>
+          <td><input class="attendance-time-input" type="datetime-local" data-attendance-check-in="${item.id}" value="${datetimeLocalValue(item.checkIn)}"></td>
+          <td><input class="attendance-time-input" type="datetime-local" data-attendance-check-out="${item.id}" value="${datetimeLocalValue(item.checkOut)}"></td>
+          <td><input class="attendance-status-input" type="text" data-attendance-status="${item.id}" value="${item.status || ""}"></td>
+          <td>
+            <div class="row-actions">
+              <button class="tiny primary" data-save-attendance="${item.id}">บันทึก</button>
+              <button class="tiny" data-cancel-attendance-edit="${item.id}">ยกเลิก</button>
+            </div>
+          </td>
+        </tr>
+      `;
+    }
     return `
       <tr>
         <td>${item.date}</td>
@@ -298,7 +333,12 @@ function renderAttendance() {
         <td>${item.checkIn ? timeText(item.checkIn) : "-"}</td>
         <td>${item.checkOut ? timeText(item.checkOut) : "-"}</td>
         <td><span class="pill ${item.checkOut ? "green" : ""}">${item.status}</span></td>
-        <td><button class="tiny" data-close-attendance="${item.id}">ปิดเวลา</button></td>
+        <td>
+          <div class="row-actions">
+            <button class="tiny" data-edit-attendance="${item.id}">แก้เวลา</button>
+            <button class="tiny" data-close-attendance="${item.id}">ปิดเวลา</button>
+          </div>
+        </td>
       </tr>
     `;
   }).join("");
@@ -563,6 +603,9 @@ function bindEvents() {
   document.body.addEventListener("click", async (event) => {
     const toggleId = event.target.dataset.toggleEmployee;
     const closeId = event.target.dataset.closeAttendance;
+    const editAttendanceId = event.target.dataset.editAttendance;
+    const saveAttendanceId = event.target.dataset.saveAttendance;
+    const cancelAttendanceEditId = event.target.dataset.cancelAttendanceEdit;
     const deleteEmployeeId = event.target.dataset.deleteEmployee;
     const deleteCampaignId = event.target.dataset.deleteCampaign;
     const removeEmployeeId = event.target.dataset.removeEmployee;
@@ -584,6 +627,40 @@ function bindEvents() {
         method: "PATCH",
         body: JSON.stringify({ checkOut: new Date().toISOString(), status: "ผู้จัดการปิดเวลา" })
       });
+      render();
+    }
+    if (editAttendanceId) {
+      editingAttendanceId = editAttendanceId;
+      renderAttendance();
+    }
+    if (cancelAttendanceEditId) {
+      editingAttendanceId = null;
+      renderAttendance();
+    }
+    if (saveAttendanceId) {
+      const checkInInput = document.querySelector(`[data-attendance-check-in="${saveAttendanceId}"]`);
+      const checkOutInput = document.querySelector(`[data-attendance-check-out="${saveAttendanceId}"]`);
+      const statusInput = document.querySelector(`[data-attendance-status="${saveAttendanceId}"]`);
+      if (!checkInInput.value) {
+        alert("กรุณาใส่เวลาเข้างาน");
+        return;
+      }
+      const checkIn = datetimeLocalToIso(checkInInput.value);
+      const checkOut = datetimeLocalToIso(checkOutInput.value);
+      if (checkOut && new Date(checkOut) < new Date(checkIn)) {
+        alert("เวลาออกงานต้องไม่น้อยกว่าเวลาเข้างาน");
+        return;
+      }
+      state = await api(`/api/attendance/${saveAttendanceId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          date: checkInInput.value.slice(0, 10),
+          checkIn,
+          checkOut,
+          status: statusInput.value.trim() || "แก้ไขโดยผู้จัดการ"
+        })
+      });
+      editingAttendanceId = null;
       render();
     }
     if (deleteEmployeeId) {
