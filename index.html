@@ -259,6 +259,22 @@
             </form>
             <div id="campaignRows" class="campaign-list"></div>
           </section>
+          <section class="panel">
+            <div class="panel-head">
+              <h3>สำรองข้อมูลระบบ</h3>
+            </div>
+            <div class="backup-tools">
+              <p>ใช้เก็บข้อมูลพนักงาน การผูก LINE ตารางเวร และประวัติลงเวลา ก่อนแก้ระบบหรือ deploy</p>
+              <div class="row-actions">
+                <button id="downloadBackup" class="primary" type="button">ดาวน์โหลดไฟล์สำรอง</button>
+                <label class="ghost file-button">
+                  กู้คืนจากไฟล์
+                  <input id="restoreBackupFile" type="file" accept="application/json,.json">
+                </label>
+              </div>
+              <div id="backupStatus" class="muted-note"></div>
+            </div>
+          </section>
         </div>
       </section>
     </main>
