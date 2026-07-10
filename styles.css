@@ -483,6 +483,18 @@ th {
   font-weight: 700;
 }
 
+.editing-row {
+  background: #fbfdff;
+}
+
+.attendance-time-input {
+  width: 190px;
+}
+
+.attendance-status-input {
+  width: 180px;
+}
+
 .schedule-tools {
   margin-bottom: 14px;
   padding: 12px;
