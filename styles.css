@@ -212,6 +212,10 @@ button {
   align-items: center;
 }
 
+.row-actions.wrap {
+  flex-wrap: wrap;
+}
+
 .employee-bulk-actions {
   position: sticky;
   bottom: 0;

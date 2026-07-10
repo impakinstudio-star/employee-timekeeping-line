@@ -9,10 +9,12 @@ const channelSecret = process.env.LINE_CHANNEL_SECRET || "";
 const channelAccessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
 const managerUser = process.env.MANAGER_USER || "manager";
 const managerPassword = process.env.MANAGER_PASSWORD || "1234";
+const databaseUrl = process.env.DATABASE_URL || "";
 const root = __dirname;
 const dataDir = process.env.DATA_DIR || root;
 const dataFile = path.join(dataDir, "data.json");
 const sessions = new Map();
+let pgPool = null;
 
 const seed = {
   employees: [
@@ -51,9 +53,18 @@ function newId() {
   return crypto.randomBytes(5).toString("hex");
 }
 
-function readDb() {
+function cloneDb(db) {
+  return JSON.parse(JSON.stringify(db));
+}
+
+async function readDb() {
+  if (databaseUrl) return readPostgresDb();
+  return readFileDb();
+}
+
+function readFileDb() {
   if (!fs.existsSync(dataFile)) {
-    writeDb(seed);
+    writeFileDb(cloneDb(seed));
   }
   const db = JSON.parse(fs.readFileSync(dataFile, "utf8"));
   return normalizeDb(db);
@@ -71,9 +82,58 @@ function normalizeDb(db) {
   return db;
 }
 
-function writeDb(db) {
+async function writeDb(db) {
+  if (databaseUrl) return writePostgresDb(db);
+  writeFileDb(db);
+}
+
+function writeFileDb(db) {
   fs.mkdirSync(dataDir, { recursive: true });
   fs.writeFileSync(dataFile, JSON.stringify(db, null, 2), "utf8");
+}
+
+async function getPgPool() {
+  if (pgPool) return pgPool;
+  let Pool;
+  try {
+    ({ Pool } = require("pg"));
+  } catch (error) {
+    throw new Error("DATABASE_URL is set, but package 'pg' is not installed. Run npm install.");
+  }
+  pgPool = new Pool({
+    connectionString: databaseUrl,
+    ssl: databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1")
+      ? false
+      : { rejectUnauthorized: false }
+  });
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS app_state (
+      id text PRIMARY KEY,
+      data jsonb NOT NULL,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `);
+  return pgPool;
+}
+
+async function readPostgresDb() {
+  const pool = await getPgPool();
+  const result = await pool.query("SELECT data FROM app_state WHERE id = $1", ["main"]);
+  if (result.rows[0]?.data) return normalizeDb(result.rows[0].data);
+  const initial = normalizeDb(cloneDb(seed));
+  await writePostgresDb(initial);
+  return initial;
+}
+
+async function writePostgresDb(db) {
+  const pool = await getPgPool();
+  const data = normalizeDb(cloneDb(db));
+  await pool.query(`
+    INSERT INTO app_state (id, data, updated_at)
+    VALUES ($1, $2::jsonb, now())
+    ON CONFLICT (id)
+    DO UPDATE SET data = EXCLUDED.data, updated_at = now()
+  `, ["main", JSON.stringify(data)]);
 }
 
 function backupPayload(db) {
@@ -273,6 +333,79 @@ function attendanceFor(db, date, employeeId) {
   return db.attendance.find((item) => item.date === date && item.employeeId === employeeId);
 }
 
+function leaveFor(db, date, employeeId) {
+  return db.leaves.find((item) => item.date === date && item.employeeId === employeeId && item.status === "approved");
+}
+
+function leaveLabel(type) {
+  if (type === "sick") return "ลาป่วย";
+  if (type === "personal") return "ลากิจ";
+  return "ลา";
+}
+
+function dateFromMessage(message, at) {
+  const base = at.slice(0, 10);
+  if (message.includes("พรุ่งนี้")) return addDays(base, 1);
+  const iso = message.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
+  if (iso) return iso[1];
+  const slash = message.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
+  if (slash) {
+    const [, d, m, y] = slash;
+    const baseYear = Number(base.slice(0, 4));
+    let year = y ? Number(y) : baseYear;
+    if (year > 2400) year -= 543;
+    if (year < 100) year += 2000;
+    return `${year}-${String(Number(m)).padStart(2, "0")}-${String(Number(d)).padStart(2, "0")}`;
+  }
+  return base;
+}
+
+function setLeave(db, { employeeId, date, type, note = "", source = "manager", groupId = "" }) {
+  db.leaves = db.leaves.filter((item) => !(item.employeeId === employeeId && item.date === date));
+  db.attendance = db.attendance.filter((item) => !(item.employeeId === employeeId && item.date === date && !item.checkIn));
+  db.leaves.push({
+    id: newId(),
+    employeeId,
+    date,
+    type,
+    status: "approved",
+    note,
+    source,
+    groupId,
+    requestedFromLine: source === "line",
+    approvedBy: "manager",
+    requestedAt: new Date().toISOString()
+  });
+}
+
+function setAbsence(db, { employeeId, date, shiftId, source = "manager" }) {
+  db.leaves = db.leaves.filter((item) => !(item.employeeId === employeeId && item.date === date));
+  let record = attendanceFor(db, date, employeeId);
+  if (!record) {
+    record = {
+      id: newId(),
+      employeeId,
+      line: "",
+      groupId: "",
+      date,
+      shiftId: shiftId || inferShift(db, date, employeeId),
+      checkIn: null,
+      checkOut: null,
+      source,
+      status: "ขาดงาน"
+    };
+    db.attendance.push(record);
+  } else {
+    record.shiftId = shiftId || record.shiftId;
+    record.status = "ขาดงาน";
+  }
+}
+
+function clearWorkdayStatus(db, { employeeId, date }) {
+  db.leaves = db.leaves.filter((item) => !(item.employeeId === employeeId && item.date === date));
+  db.attendance = db.attendance.filter((item) => !(item.employeeId === employeeId && item.date === date && !item.checkIn));
+}
+
 function inferShift(db, date, employeeId) {
   const assigned = db.schedules.find((item) => item.date === date && item.employeeId === employeeId);
   return assigned?.shiftId || shiftsForDate(db, date)[0]?.id || "morning";
@@ -316,6 +449,20 @@ function handleCommand(db, { lineUserId, groupId, message, at = new Date().toISO
     return { ok: true, reply: `บันทึกออกงานให้ ${employee.name} แล้ว` };
   }
 
+  if (message.includes("ลาป่วย") || message.includes("ป่วย") || message.includes("ลากิจ") || message.includes("ธุระ") || message.includes("ลา") || message.includes("หยุด")) {
+    const leaveDate = dateFromMessage(message, at);
+    const type = (message.includes("ลาป่วย") || message.includes("ป่วย")) ? "sick" : "personal";
+    setLeave(db, {
+      employeeId: employee.id,
+      date: leaveDate,
+      type,
+      note: message,
+      source: "line",
+      groupId
+    });
+    return { ok: true, reply: `บันทึก${leaveLabel(type)}ให้ ${employee.name} วันที่ ${leaveDate} แล้ว` };
+  }
+
   if (message.includes("ลา") || message.includes("หยุด")) {
     db.leaves.push({
       id: newId(),
@@ -342,6 +489,8 @@ function payroll(db, month) {
     const records = db.attendance.filter((item) => item.employeeId === employee.id && item.date.startsWith(month) && item.checkIn);
     const workDates = new Set(records.map((item) => item.date));
     const leaves = db.leaves.filter((item) => item.employeeId === employee.id && item.date.startsWith(month) && item.status === "approved");
+    const sickLeaveDays = leaves.filter((leave) => leave.type === "sick").length;
+    const personalLeaveDays = leaves.filter((leave) => leave.type === "personal").length;
     const scheduledDates = new Set(db.schedules.filter((item) => item.employeeId === employee.id && item.date.startsWith(month)).map((item) => item.date));
     const absentDays = [...scheduledDates].filter((date) => !workDates.has(date) && !leaves.some((leave) => leave.date === date)).length;
     return {
@@ -350,6 +499,8 @@ function payroll(db, month) {
       wage: employee.wage,
       workDays: workDates.size,
       leaveDays: leaves.length,
+      sickLeaveDays,
+      personalLeaveDays,
       absentDays,
       total: workDates.size * employee.wage
     };
@@ -397,7 +548,7 @@ function parseIsoDate(date) {
 }
 
 async function api(req, res, pathname) {
-  const db = readDb();
+  const db = await readDb();
   const method = req.method || "GET";
 
   if (method === "GET" && pathname === "/api/session") {
@@ -443,7 +594,7 @@ async function api(req, res, pathname) {
         action: "restore_backup",
         at: new Date().toISOString()
       });
-      writeDb(restored);
+      await writeDb(restored);
       return json(res, 200, restored);
     } catch (error) {
       return json(res, 400, { error: error.message || "Invalid backup file" });
@@ -452,8 +603,9 @@ async function api(req, res, pathname) {
 
   if (method === "POST" && pathname === "/api/reset") {
     if (!requireManager(req, res)) return;
-    writeDb(seed);
-    return json(res, 200, seed);
+    const freshSeed = cloneDb(seed);
+    await writeDb(freshSeed);
+    return json(res, 200, freshSeed);
   }
 
   if (method === "POST" && pathname === "/api/employees") {
@@ -471,7 +623,7 @@ async function api(req, res, pathname) {
       allowedShifts: ["morning", "evening", "night"]
     });
     db.auditLogs.push({ id: newId(), actor: manager.user, action: "create_employee", after: body, at: new Date().toISOString() });
-    writeDb(db);
+    await writeDb(db);
     return json(res, 201, db);
   }
 
@@ -493,7 +645,7 @@ async function api(req, res, pathname) {
       });
     });
     db.auditLogs.push({ id: newId(), actor: manager.user, action: "bulk_update_employees", before, after: updates, at: new Date().toISOString() });
-    writeDb(db);
+    await writeDb(db);
     return json(res, 200, db);
   }
 
@@ -507,7 +659,7 @@ async function api(req, res, pathname) {
     const before = { ...employee };
     Object.assign(employee, body);
     db.auditLogs.push({ id: newId(), actor: manager.user, action: "update_employee", targetId: employeeId, before, after: body, at: new Date().toISOString() });
-    writeDb(db);
+    await writeDb(db);
     return json(res, 200, db);
   }
 
@@ -522,7 +674,7 @@ async function api(req, res, pathname) {
     db.leaves = db.leaves.filter((item) => item.employeeId !== employeeId);
     db.attendance = db.attendance.filter((item) => item.employeeId !== employeeId);
     db.auditLogs.push({ id: newId(), actor: manager.user, action: "delete_employee", targetId: employeeId, before: employee, at: new Date().toISOString() });
-    writeDb(db);
+    await writeDb(db);
     return json(res, 200, db);
   }
 
@@ -532,7 +684,7 @@ async function api(req, res, pathname) {
     const body = JSON.parse(await readBody(req));
     db.campaigns.push({ id: newId(), name: body.name, date: body.date });
     db.auditLogs.push({ id: newId(), actor: manager.user, action: "create_campaign", after: body, at: new Date().toISOString() });
-    writeDb(db);
+    await writeDb(db);
     return json(res, 201, db);
   }
 
@@ -542,7 +694,7 @@ async function api(req, res, pathname) {
     const campaignId = pathname.split("/").pop();
     db.campaigns = db.campaigns.filter((item) => item.id !== campaignId);
     db.auditLogs.push({ id: newId(), actor: manager.user, action: "delete_campaign", targetId: campaignId, at: new Date().toISOString() });
-    writeDb(db);
+    await writeDb(db);
     return json(res, 200, db);
   }
 
@@ -556,7 +708,7 @@ async function api(req, res, pathname) {
     const before = { ...shift };
     Object.assign(shift, body);
     db.auditLogs.push({ id: newId(), actor: manager.user, action: "update_shift", targetId: shiftId, before, after: body, at: new Date().toISOString() });
-    writeDb(db);
+    await writeDb(db);
     return json(res, 200, db);
   }
 
@@ -566,7 +718,7 @@ async function api(req, res, pathname) {
     const body = JSON.parse(await readBody(req));
     autoSchedule(db, body.date || todayIso(), Number(body.days || 1));
     db.auditLogs.push({ id: newId(), actor: manager.user, action: "auto_schedule", after: body, at: new Date().toISOString() });
-    writeDb(db);
+    await writeDb(db);
     return json(res, 200, db);
   }
 
@@ -593,7 +745,7 @@ async function api(req, res, pathname) {
       status: "scheduled"
     });
     db.auditLogs.push({ id: newId(), actor: manager.user, action: "assign_schedule", after: body, at: new Date().toISOString() });
-    writeDb(db);
+    await writeDb(db);
     return json(res, 200, db);
   }
 
@@ -604,7 +756,7 @@ async function api(req, res, pathname) {
     const before = db.schedules.find((item) => item.date === body.date && item.shiftId === body.shiftId && item.employeeId === body.employeeId);
     db.schedules = db.schedules.filter((item) => !(item.date === body.date && item.shiftId === body.shiftId && item.employeeId === body.employeeId));
     db.auditLogs.push({ id: newId(), actor: manager.user, action: "remove_schedule", before, after: body, at: new Date().toISOString() });
-    writeDb(db);
+    await writeDb(db);
     return json(res, 200, db);
   }
 
@@ -612,7 +764,7 @@ async function api(req, res, pathname) {
     if (!requireManager(req, res)) return;
     const body = JSON.parse(await readBody(req));
     const result = handleCommand(db, body);
-    writeDb(db);
+    await writeDb(db);
     return json(res, 200, { ...result, state: db });
   }
 
@@ -626,7 +778,7 @@ async function api(req, res, pathname) {
     employee.line = body.lineUserId;
     db.pendingLineUsers = db.pendingLineUsers.filter((item) => item.lineUserId !== body.lineUserId);
     db.auditLogs.push({ id: newId(), actor: manager.user, action: "bind_line_user", targetId: employee.id, before, after: { lineUserId: body.lineUserId }, at: new Date().toISOString() });
-    writeDb(db);
+    await writeDb(db);
     return json(res, 200, db);
   }
 
@@ -640,7 +792,45 @@ async function api(req, res, pathname) {
     const before = { ...record };
     Object.assign(record, body);
     db.auditLogs.push({ id: newId(), actor: manager.user, action: "update_attendance", targetId: attendanceId, before, after: body, at: new Date().toISOString() });
-    writeDb(db);
+    await writeDb(db);
+    return json(res, 200, db);
+  }
+
+  if (method === "POST" && pathname === "/api/workday-status") {
+    const manager = requireManager(req, res);
+    if (!manager) return;
+    const body = JSON.parse(await readBody(req));
+    const employee = db.employees.find((item) => item.id === body.employeeId);
+    if (!employee) return json(res, 404, { error: "Employee not found" });
+    const before = {
+      attendance: db.attendance.filter((item) => item.employeeId === body.employeeId && item.date === body.date),
+      leaves: db.leaves.filter((item) => item.employeeId === body.employeeId && item.date === body.date)
+    };
+    if (body.status === "sick" || body.status === "personal") {
+      setLeave(db, {
+        employeeId: body.employeeId,
+        date: body.date,
+        type: body.status,
+        note: body.note || "",
+        source: "manager"
+      });
+    } else if (body.status === "absent") {
+      setAbsence(db, {
+        employeeId: body.employeeId,
+        date: body.date,
+        shiftId: body.shiftId,
+        source: "manager"
+      });
+    } else if (body.status === "clear") {
+      clearWorkdayStatus(db, {
+        employeeId: body.employeeId,
+        date: body.date
+      });
+    } else {
+      return json(res, 400, { error: "Invalid status" });
+    }
+    db.auditLogs.push({ id: newId(), actor: manager.user, action: "set_workday_status", targetId: body.employeeId, before, after: body, at: new Date().toISOString() });
+    await writeDb(db);
     return json(res, 200, db);
   }
 
@@ -668,7 +858,7 @@ async function api(req, res, pathname) {
         }
       }
     }
-    writeDb(db);
+    await writeDb(db);
     return json(res, 200, { ok: true, replies });
   }
 

@@ -43,6 +43,7 @@ let state = {
 let selectedDate = todayIso();
 let session = { authenticated: false, user: null };
 let editingAttendanceId = null;
+const autoBackupKey = "employee-timekeeping-auto-backup-v1";
 const weekdays = [
   { value: 1, short: "จ", name: "จันทร์" },
   { value: 2, short: "อ", name: "อังคาร" },
@@ -52,6 +53,10 @@ const weekdays = [
   { value: 6, short: "ส", name: "เสาร์" },
   { value: 7, short: "อา", name: "อาทิตย์" }
 ];
+const leaveLabels = {
+  sick: "ลาป่วย",
+  personal: "ลากิจ"
+};
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -76,7 +81,22 @@ async function api(path, options = {}) {
 }
 
 async function loadState() {
-  state = await api("/api/state");
+  const serverState = await api("/api/state");
+  const backup = readAutoBackup();
+  if (shouldAutoRestore(serverState, backup)) {
+    try {
+      state = await api("/api/restore", {
+        method: "POST",
+        body: JSON.stringify(backup)
+      });
+      setBackupStatus("กู้คืนข้อมูลอัตโนมัติจากเครื่องนี้แล้ว");
+    } catch (error) {
+      state = serverState;
+      setBackupStatus("พบข้อมูลสำรองในเครื่อง แต่กู้คืนอัตโนมัติไม่สำเร็จ");
+    }
+  } else {
+    state = serverState;
+  }
   render();
 }
 
@@ -125,6 +145,108 @@ function findShift(shiftId) {
   return state.shifts.find((shift) => shift.id === shiftId);
 }
 
+function backupStateScore(data) {
+  if (!data) return 0;
+  return [
+    data.employees?.length || 0,
+    data.schedules?.length || 0,
+    data.attendance?.length || 0,
+    data.leaves?.length || 0,
+    data.pendingLineUsers?.length || 0,
+    data.auditLogs?.length || 0
+  ].reduce((total, count, index) => total + count * [10, 4, 5, 3, 2, 1][index], 0);
+}
+
+function employeeFingerprint(data) {
+  return (data?.employees || [])
+    .map((employee) => [employee.id, employee.code, employee.name, employee.line, employee.wage, employee.active].join("|"))
+    .sort()
+    .join(";");
+}
+
+function hasMeaningfulBackupData(data) {
+  if (!data) return false;
+  return Boolean(
+    (data.employees || []).length ||
+    (data.schedules || []).length ||
+    (data.attendance || []).length ||
+    (data.leaves || []).length ||
+    (data.pendingLineUsers || []).length
+  );
+}
+
+function makeBackupPayload(data) {
+  return {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    app: "employee-timekeeping-line",
+    source: "browser-auto-backup",
+    data
+  };
+}
+
+function readAutoBackup() {
+  try {
+    const raw = localStorage.getItem(autoBackupKey);
+    if (!raw) return null;
+    const backup = JSON.parse(raw);
+    if (backup?.app !== "employee-timekeeping-line" || !backup.data) return null;
+    return backup;
+  } catch (error) {
+    return null;
+  }
+}
+
+function saveAutoBackup(data = state) {
+  if (!hasMeaningfulBackupData(data)) return;
+  try {
+    localStorage.setItem(autoBackupKey, JSON.stringify(makeBackupPayload(data)));
+    updateAutoBackupStatus();
+  } catch (error) {
+    setBackupStatus("สำรองอัตโนมัติในเครื่องไม่สำเร็จ");
+  }
+}
+
+function shouldAutoRestore(serverState, backup) {
+  const backupData = backup?.data;
+  if (!hasMeaningfulBackupData(backupData)) return false;
+  const serverScore = backupStateScore(serverState);
+  const backupScore = backupStateScore(backupData);
+  if (backupScore > serverScore) return true;
+  return looksLikeFreshServerState(serverState) &&
+    (backupData.employees?.length || 0) >= (serverState.employees?.length || 0) &&
+    employeeFingerprint(serverState) !== employeeFingerprint(backupData);
+}
+
+function looksLikeFreshServerState(data) {
+  if (!data) return true;
+  return !(
+    (data.schedules || []).length ||
+    (data.attendance || []).length ||
+    (data.leaves || []).length ||
+    (data.pendingLineUsers || []).length ||
+    (data.auditLogs || []).length
+  );
+}
+
+function setBackupStatus(message) {
+  const status = document.querySelector("#backupStatus");
+  if (status) status.textContent = message;
+}
+
+function updateAutoBackupStatus() {
+  const status = document.querySelector("#autoBackupStatus");
+  if (!status) return;
+  const backup = readAutoBackup();
+  if (!backup) {
+    status.textContent = "ยังไม่มีสำเนาอัตโนมัติในเครื่องนี้";
+    return;
+  }
+  const exportedAt = new Date(backup.exportedAt).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" });
+  const data = backup.data || {};
+  status.textContent = `สำรองอัตโนมัติล่าสุด ${exportedAt} | พนักงาน ${data.employees?.length || 0} คน | ลงเวลา ${data.attendance?.length || 0} รายการ`;
+}
+
 function assignmentsFor(date, shiftId) {
   return state.schedules.filter((item) => item.date === date && item.shiftId === shiftId);
 }
@@ -133,7 +255,70 @@ function attendanceFor(date, employeeId) {
   return state.attendance.find((item) => item.date === date && item.employeeId === employeeId);
 }
 
+function leaveFor(date, employeeId) {
+  return state.leaves.find((item) => item.date === date && item.employeeId === employeeId && item.status === "approved");
+}
+
+function workdayRows() {
+  const rows = [];
+  const keys = new Set();
+  state.schedules
+    .filter((item) => item.date === selectedDate)
+    .forEach((schedule) => {
+      const key = `${schedule.date}:${schedule.employeeId}`;
+      keys.add(key);
+      rows.push({
+        key,
+        date: schedule.date,
+        employeeId: schedule.employeeId,
+        shiftId: schedule.shiftId,
+        attendance: attendanceFor(schedule.date, schedule.employeeId),
+        leave: leaveFor(schedule.date, schedule.employeeId),
+        scheduled: true
+      });
+    });
+
+  state.attendance
+    .filter((item) => item.date === selectedDate && !keys.has(`${item.date}:${item.employeeId}`))
+    .forEach((attendance) => {
+      const key = `${attendance.date}:${attendance.employeeId}`;
+      keys.add(key);
+      rows.push({
+        key,
+        date: attendance.date,
+        employeeId: attendance.employeeId,
+        shiftId: attendance.shiftId,
+        attendance,
+        leave: leaveFor(attendance.date, attendance.employeeId),
+        scheduled: false
+      });
+    });
+
+  state.leaves
+    .filter((item) => item.date === selectedDate && item.status === "approved" && !keys.has(`${item.date}:${item.employeeId}`))
+    .forEach((leave) => {
+      rows.push({
+        key: `${leave.date}:${leave.employeeId}`,
+        date: leave.date,
+        employeeId: leave.employeeId,
+        shiftId: "",
+        attendance: null,
+        leave,
+        scheduled: false
+      });
+    });
+
+  return rows.sort((a, b) => (a.shiftId || "").localeCompare(b.shiftId || "") || (findEmployee(a.employeeId)?.name || "").localeCompare(findEmployee(b.employeeId)?.name || ""));
+}
+
+function workdayStatus(row) {
+  if (row.leave) return leaveLabels[row.leave.type] || row.leave.type || "ลา";
+  if (row.attendance?.status) return row.attendance.status;
+  return row.scheduled ? "ยังไม่เข้างาน" : "-";
+}
+
 function render() {
+  saveAutoBackup();
   renderLineEmployees();
   renderDashboard();
   renderEmployees();
@@ -142,6 +327,7 @@ function render() {
   renderAttendance();
   renderPayroll();
   renderSettings();
+  updateAutoBackupStatus();
 }
 
 function renderLineEmployees() {
@@ -303,14 +489,15 @@ function renderSchedule() {
 }
 
 function renderAttendance() {
-  const rows = [...state.attendance].sort((a, b) => (b.date + (b.checkIn || "")).localeCompare(a.date + (a.checkIn || "")));
-  document.querySelector("#attendanceRows").innerHTML = rows.map((item) => {
-    const employee = findEmployee(item.employeeId);
-    const shift = findShift(item.shiftId);
-    if (editingAttendanceId === item.id) {
+  const rows = workdayRows();
+  document.querySelector("#attendanceRows").innerHTML = rows.length ? rows.map((row) => {
+    const item = row.attendance;
+    const employee = findEmployee(row.employeeId);
+    const shift = findShift(row.shiftId);
+    if (item && editingAttendanceId === item.id) {
       return `
         <tr class="editing-row">
-          <td>${item.date}</td>
+          <td>${row.date}</td>
           <td>${employee?.name || "-"}</td>
           <td>${shift?.name || "-"}</td>
           <td><input class="attendance-time-input" type="datetime-local" data-attendance-check-in="${item.id}" value="${datetimeLocalValue(item.checkIn)}"></td>
@@ -327,21 +514,25 @@ function renderAttendance() {
     }
     return `
       <tr>
-        <td>${item.date}</td>
+        <td>${row.date}</td>
         <td>${employee?.name || "-"}</td>
         <td>${shift?.name || "-"}</td>
-        <td>${item.checkIn ? timeText(item.checkIn) : "-"}</td>
-        <td>${item.checkOut ? timeText(item.checkOut) : "-"}</td>
-        <td><span class="pill ${item.checkOut ? "green" : ""}">${item.status}</span></td>
+        <td>${item?.checkIn ? timeText(item.checkIn) : "-"}</td>
+        <td>${item?.checkOut ? timeText(item.checkOut) : "-"}</td>
+        <td><span class="pill ${row.leave ? "blue" : item?.checkOut ? "green" : item?.status === "ขาดงาน" ? "red" : ""}">${workdayStatus(row)}</span></td>
         <td>
-          <div class="row-actions">
-            <button class="tiny" data-edit-attendance="${item.id}">แก้เวลา</button>
-            <button class="tiny" data-close-attendance="${item.id}">ปิดเวลา</button>
+          <div class="row-actions wrap">
+            ${item?.id ? `<button class="tiny" data-edit-attendance="${item.id}">แก้เวลา</button>` : ""}
+            ${item?.id && item.checkIn && !item.checkOut ? `<button class="tiny" data-close-attendance="${item.id}">ปิดเวลา</button>` : ""}
+            <button class="tiny" data-workday-status="sick" data-workday-employee="${row.employeeId}" data-workday-date="${row.date}" data-workday-shift="${row.shiftId || ""}">ลาป่วย</button>
+            <button class="tiny" data-workday-status="personal" data-workday-employee="${row.employeeId}" data-workday-date="${row.date}" data-workday-shift="${row.shiftId || ""}">ลากิจ</button>
+            <button class="tiny danger" data-workday-status="absent" data-workday-employee="${row.employeeId}" data-workday-date="${row.date}" data-workday-shift="${row.shiftId || ""}">ขาดงาน</button>
+            ${(row.leave || item?.status === "ขาดงาน") ? `<button class="tiny" data-workday-status="clear" data-workday-employee="${row.employeeId}" data-workday-date="${row.date}" data-workday-shift="${row.shiftId || ""}">เคลียร์</button>` : ""}
           </div>
         </td>
       </tr>
     `;
-  }).join("");
+  }).join("") : `<tr><td colspan="7">ยังไม่มีรายการของวันที่เลือก</td></tr>`;
 }
 
 function renderPayroll() {
@@ -351,7 +542,7 @@ function renderPayroll() {
     <tr>
       <td>${row.name}</td>
       <td>${row.workDays}</td>
-      <td>${row.leaveDays}</td>
+      <td>ป่วย ${row.sickLeaveDays} / กิจ ${row.personalLeaveDays}</td>
       <td>${row.absentDays}</td>
       <td>${baht(row.wage)}</td>
       <td><strong>${baht(row.total)}</strong></td>
@@ -390,6 +581,8 @@ function weeklyPayroll() {
     const records = state.attendance.filter((item) => item.employeeId === employee.id && isDateBetween(item.date, start, end) && item.checkIn);
     const workDates = new Set(records.map((item) => item.date));
     const leaves = state.leaves.filter((item) => item.employeeId === employee.id && isDateBetween(item.date, start, end) && item.status === "approved");
+    const sickLeaveDays = leaves.filter((leave) => leave.type === "sick").length;
+    const personalLeaveDays = leaves.filter((leave) => leave.type === "personal").length;
     const scheduledDates = new Set(state.schedules.filter((item) => item.employeeId === employee.id && isDateBetween(item.date, start, end)).map((item) => item.date));
     const absentDays = [...scheduledDates].filter((date) => !workDates.has(date) && !leaves.some((leave) => leave.date === date)).length;
     return {
@@ -398,6 +591,8 @@ function weeklyPayroll() {
       wage: employee.wage,
       workDays: workDates.size,
       leaveDays: leaves.length,
+      sickLeaveDays,
+      personalLeaveDays,
       absentDays,
       total: workDates.size * employee.wage
     };
@@ -644,6 +839,7 @@ function bindEvents() {
     const editAttendanceId = event.target.dataset.editAttendance;
     const saveAttendanceId = event.target.dataset.saveAttendance;
     const cancelAttendanceEditId = event.target.dataset.cancelAttendanceEdit;
+    const workdayStatusValue = event.target.dataset.workdayStatus;
     const deleteEmployeeId = event.target.dataset.deleteEmployee;
     const deleteCampaignId = event.target.dataset.deleteCampaign;
     const removeEmployeeId = event.target.dataset.removeEmployee;
@@ -699,6 +895,21 @@ function bindEvents() {
         })
       });
       editingAttendanceId = null;
+      render();
+    }
+    if (workdayStatusValue) {
+      const employeeId = event.target.dataset.workdayEmployee;
+      const date = event.target.dataset.workdayDate;
+      const shiftId = event.target.dataset.workdayShift;
+      state = await api("/api/workday-status", {
+        method: "POST",
+        body: JSON.stringify({
+          employeeId,
+          date,
+          shiftId,
+          status: workdayStatusValue
+        })
+      });
       render();
     }
     if (deleteEmployeeId) {
@@ -800,21 +1011,21 @@ function bindEvents() {
   });
 
   document.querySelector("#exportPayroll").addEventListener("click", () => {
-    const rows = [["พนักงาน", "วันทำงาน", "ลา/หยุด", "ขาด", "ค่าแรงรายวัน", "รวม"]];
-    weeklyPayroll().forEach((row) => rows.push([row.name, row.workDays, row.leaveDays, row.absentDays, row.wage, row.total]));
+    const rows = [["พนักงาน", "วันทำงาน", "ลาป่วย", "ลากิจ", "ขาด", "ค่าแรงรายวัน", "รวม"]];
+    weeklyPayroll().forEach((row) => rows.push([row.name, row.workDays, row.sickLeaveDays, row.personalLeaveDays, row.absentDays, row.wage, row.total]));
     const { start, end } = weekRange(selectedDate);
     exportCsv(`payroll-${start}-to-${end}.csv`, rows);
   });
 
   document.querySelector("#exportAttendance").addEventListener("click", () => {
     const rows = [["วันที่", "พนักงาน", "กะ", "เข้า", "ออก", "สถานะ"]];
-    state.attendance.forEach((item) => rows.push([
-      item.date,
-      findEmployee(item.employeeId)?.name || "",
-      findShift(item.shiftId)?.name || "",
-      item.checkIn ? timeText(item.checkIn) : "",
-      item.checkOut ? timeText(item.checkOut) : "",
-      item.status
+    workdayRows().forEach((row) => rows.push([
+      row.date,
+      findEmployee(row.employeeId)?.name || "",
+      findShift(row.shiftId)?.name || "",
+      row.attendance?.checkIn ? timeText(row.attendance.checkIn) : "",
+      row.attendance?.checkOut ? timeText(row.attendance.checkOut) : "",
+      workdayStatus(row)
     ]));
     exportCsv(`attendance-${selectedDate}.csv`, rows);
   });
