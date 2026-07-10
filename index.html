@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ระบบเวลาพนักงาน</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <section id="loginOverlay" class="login-overlay">
+      <form id="loginForm" class="login-card">
+        <div class="brand login-brand">
+          <div class="brand-mark">T</div>
+          <div>
+            <h1>ระบบเวลาพนักงาน</h1>
+            <p>Manager Login</p>
+          </div>
+        </div>
+        <label>
+          ผู้ใช้
+          <input name="username" autocomplete="username" value="manager" required>
+        </label>
+        <label>
+          รหัสผ่าน
+          <input name="password" type="password" autocomplete="current-password" value="1234" required>
+        </label>
+        <button class="primary" type="submit">เข้าสู่ระบบ</button>
+        <p id="loginError" class="login-error"></p>
+      </form>
+    </section>
+
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">T</div>
+        <div>
+          <h1>ระบบเวลาพนักงาน</h1>
+          <p>LINE Timekeeping</p>
+        </div>
+      </div>
+      <nav class="nav" aria-label="เมนูหลัก">
+        <button class="nav-item active" data-view="dashboard" title="แดชบอร์ด">⌂<span>แดชบอร์ด</span></button>
+        <button class="nav-item" data-view="employees" title="พนักงาน">♙<span>พนักงาน</span></button>
+        <button class="nav-item" data-view="schedule" title="ตารางเวร">▦<span>ตารางเวร</span></button>
+        <button class="nav-item" data-view="attendance" title="ลงเวลา">◷<span>ลงเวลา</span></button>
+        <button class="nav-item" data-view="payroll" title="ค่าแรง">฿<span>ค่าแรง</span></button>
+        <button class="nav-item" data-view="settings" title="ตั้งค่า">⚙<span>ตั้งค่า</span></button>
+      </nav>
+      <div class="manager-box">
+        <span>สถานะระบบ</span>
+        <strong id="managerStatus">ยังไม่ได้เข้าสู่ระบบ</strong>
+      </div>
+    </aside>
+
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">วันนี้</p>
+          <h2 id="pageTitle">แดชบอร์ด</h2>
+        </div>
+        <div class="topbar-actions">
+          <input id="datePicker" type="date" aria-label="เลือกวันที่">
+          <button id="logoutButton" class="ghost" type="button">ออกจากระบบ</button>
+          <button id="resetDemo" class="ghost" type="button">รีเซ็ตข้อมูลตัวอย่าง</button>
+        </div>
+      </header>
+
+      <section id="dashboard" class="view active">
+        <div class="metric-grid">
+          <article class="metric">
+            <span>เข้างานแล้ว</span>
+            <strong id="metricCheckedIn">0</strong>
+          </article>
+          <article class="metric">
+            <span>ยังไม่เข้างาน</span>
+            <strong id="metricMissing">0</strong>
+          </article>
+          <article class="metric">
+            <span>ลา/หยุด</span>
+            <strong id="metricLeave">0</strong>
+          </article>
+          <article class="metric">
+            <span>ค่าแรงรอบนี้</span>
+            <strong id="metricPayroll">฿0</strong>
+          </article>
+        </div>
+
+        <div class="content-grid">
+          <section class="panel wide">
+            <div class="panel-head">
+              <h3>สถานะกะวันนี้</h3>
+              <button id="autoScheduleToday" class="primary" type="button">จัดเวรวันนี้</button>
+            </div>
+            <div id="shiftStatus" class="shift-list"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <h3>จำลองข้อความ LINE</h3>
+            </div>
+            <div class="line-simulator">
+              <label>พนักงาน</label>
+              <select id="lineEmployee"></select>
+              <label>ข้อความ</label>
+              <div class="input-row">
+                <input id="lineCommand" placeholder="เช่น เข้างาน หรือ ออกงาน">
+                <button id="sendLine" class="primary" type="button">ส่ง</button>
+              </div>
+              <p id="lineReply" class="reply">รอรับข้อความ</p>
+            </div>
+          </section>
+        </div>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h3>รายการที่ต้องตรวจ</h3>
+          </div>
+          <div id="alerts" class="alert-list"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <h3>LINE ที่รอผูกกับพนักงาน</h3>
+          </div>
+          <div class="table-wrap">
+            <table class="compact-table">
+              <thead>
+                <tr>
+                  <th>LINE user ID</th>
+                  <th>ข้อความล่าสุด</th>
+                  <th>เห็นล่าสุด</th>
+                  <th>ผูกกับพนักงาน</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="pendingLineRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="employees" class="view">
+        <section class="panel">
+          <div class="panel-head">
+            <h3>รายชื่อพนักงาน</h3>
+          </div>
+          <form id="employeeForm" class="form-grid">
+            <input name="name" placeholder="ชื่อพนักงาน" required>
+            <input name="code" placeholder="รหัสพนักงาน" required>
+            <input name="line" placeholder="LINE user ID" required>
+            <input name="wage" type="number" min="0" placeholder="ค่าแรงรายวัน" required>
+            <button class="primary" type="submit">เพิ่มพนักงาน</button>
+          </form>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>รหัส</th>
+                  <th>ชื่อ</th>
+                  <th>LINE</th>
+                  <th>ค่าแรง</th>
+                  <th>วันหยุดประจำ</th>
+                  <th>กะที่ทำได้</th>
+                  <th>สถานะ</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="employeeRows"></tbody>
+            </table>
+          </div>
+          <div class="employee-bulk-actions">
+            <button id="saveAllEmployees" class="primary" type="button">บันทึกทั้งหมด</button>
+            <span id="employeeSaveStatus"></span>
+          </div>
+        </section>
+      </section>
+
+      <section id="schedule" class="view">
+        <section class="panel">
+          <div class="panel-head">
+            <h3>ตารางเวร</h3>
+            <button id="autoScheduleWeek" class="primary" type="button">จัดเวร 7 วัน</button>
+          </div>
+          <div class="schedule-tools">
+            <div>
+              <strong>พนักงาน</strong>
+              <div id="schedulePeople" class="people-palette"></div>
+            </div>
+            <div id="removeScheduleZone" class="remove-drop-zone">
+              ลากชื่อจากตารางมาวางที่นี่เพื่อเอาออกจากเวร
+            </div>
+          </div>
+          <div id="scheduleBoard" class="schedule-board"></div>
+        </section>
+      </section>
+
+      <section id="attendance" class="view">
+        <section class="panel">
+          <div class="panel-head">
+            <h3>รายการลงเวลา</h3>
+            <button id="exportAttendance" class="ghost">Export CSV</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>วันที่</th>
+                  <th>พนักงาน</th>
+                  <th>กะ</th>
+                  <th>เข้า</th>
+                  <th>ออก</th>
+                  <th>สถานะ</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="attendanceRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="payroll" class="view">
+        <section class="panel">
+          <div class="panel-head">
+            <h3 id="payrollTitle">สรุปค่าแรงรายอาทิตย์</h3>
+            <button id="exportPayroll" class="ghost">Export CSV</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>พนักงาน</th>
+                  <th>วันทำงาน</th>
+                  <th>ลา/หยุด</th>
+                  <th>ขาด</th>
+                  <th>ค่าแรงรายวัน</th>
+                  <th>รวม</th>
+                </tr>
+              </thead>
+              <tbody id="payrollRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="settings" class="view">
+        <div class="content-grid">
+          <section class="panel">
+            <div class="panel-head">
+              <h3>กะและอัตรากำลัง</h3>
+            </div>
+            <div id="shiftSettings" class="settings-list"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <h3>วันพิเศษ</h3>
+            </div>
+            <form id="campaignForm" class="stack-form">
+              <input name="name" placeholder="ชื่อแคมเปญ" required>
+              <input name="date" type="date" required>
+              <button class="primary" type="submit">เพิ่มวันพิเศษ</button>
+            </form>
+            <div id="campaignRows" class="campaign-list"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
